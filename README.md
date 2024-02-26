@@ -273,3 +273,122 @@ X.store(r1,...) depends on r1
 4. r1 is set to true by Y.load (1)
 5. X is set to true by X.store(r1) (2)
 6. t2 wakes up and sets r2 to true by X.load() (3)
+
+## Acquire and Release 
+- Acquire -> load
+- Release -> store
+- AcqReq -> load and store (like fetch_add)
+
+Rules
+1. Load and stores cannot be moved forward past a store with Ordering::Release.
+2. Load and stores cannot be moved back before a load with Ordering::Acquire
+3. Ordering::Acquire load of a variable must see all stores that happened before 
+an Ordering::Release store that stored what the load loaded
+
+```
+static X: AtomicBool = AtomicBool::new(false);
+static Y: AtomicBool = AtomicBool::new(false);
+
+let t1 = spawn(|| {
+    let r1 = Y.load(Ordering::Acquire);
+    X.store(r1, Ordering::Release);
+});
+
+let t2 = spawn(|| {
+    let r2 = X.load(Ordering::Acquire); (1)
+    Y.store(true, Ordering::Release); (2)
+});
+```
+The first rule prevents the reordering or (1) and (2) and prevents earlier
+scenario from happening
+
+On x86, there is no additional cost to using Ordering::Release/Acquire over
+Ordering::Relaxed. This is not the case for other architectures and your programs
+might be faster if you use Relaxed for atomic operations that can tolerate weaker
+memory ordering guarantees. 
+
+## Running TSan
+RUSTFLAGS="-Z sanitizer=$SAN" cargo test --target x86_64-unknown-linux-gnu
+Where $SAN is one of address, leak, memory or thread.
+
+## Include generated bindings
+If bindgen runs in build.rs and generate bindings.rs, it can be included with
+the following
+```
+include!(concat!(env!("OUT_DIR"), "/bindings/rs"));
+```
+
+## Include assembly files *.S 
+To include assembly files, can consider having a build.rs that compiles the .S file 
+into an object and then packages it into a static archive .a using something like ar before
+linking it via "cargo:rustc-link-lib=static=xyz" in the build file. 
+
+## Rust runtime
+There's in some special code that run before main and be can be considered a 
+bare-bones runtime such as the panic handler. 
+Panic handler invokes the panic hook set via set::panic::set_hook.
+Not all targets, especially embedded ones, provide a panic handler.  
+
+The first thing that runs in Rust is not main, but a standard library call 
+***lang_start***. It setups the rust runtime, including 
+
+1) stashing the program's command line arguments (so that std::env::args can get to them), 
+2) setting the name of the main thread
+3) handling panics in the main function
+4) flushing standard output on program exit
+5) setting up signal handlers 
+
+#![no_main] attrribute, completey omits lang_start, which means the developer
+must figure out how the program should be started such as by declaring a function
+with #[export_name = "main"]
+
+## Out of memory handler
+The default behavior of the out-of-memory handler on std-enabled platforms is to print an error message to standard error and then abort the process. However, on a platform that, for example, doesn’t have standard error, that obviously won’t work. At the time of writing, on such platforms your program must explicitly define an out-of-memory handler using the unstable attribute #[lang = "oom"].
+
+## Low level low memory access
+It is common for hardware devices have memory-mapped registers that are
+modified when they are read, meaning the read have side effects. 
+Rust provides volatile memory operations that cannot be elided or reordered with respect to other volatile operations. These operations take the form of std::ptr::read_volatile and std::ptr::write_volatile.
+
+# Cargo tools
+- cargo-deny: Lint dependency graph
+- cargo-expand: Expand macro
+- cargo-hack: Check if crate works with any combination of features enabled
+- cargo-llvm-lines: Analyze mapping from Rust Code to the IR and tells you which 
+bit produce the largest IR. Largest IR means longer compile times so knowing
+which code generates a bigger IR can present opportunities for reducing compile times
+- cargo-outdated - Check if dependencies have newer version available
+- cargo-udeps - Check for unused dependencies
+
+## Libraries
+- bytes: Efficent mechanism for passing subslices of single piece of contiguous 
+memory without having to deal with lifetimes. Common in low level networking code
+- criterion: Statistics based benchmarking library
+- flume: MPMC (multiple produce, multiple consumer) channel that is faster and 
+simpler than std library's and supports both async and sync
+- hdrhistogram: High dynamic range histogram
+- heapless: Provides data structures that do not use the heap, perfect for embedded
+- itertools: extends Iterator trait from std library. Can reduce boiler plate, so example
+checking if an iterator has exactly one time (Itertools::exactly_one)
+- nix: Idiomatic bindings to system calls on Unix-like systems
+- pin-project: Avoid the hassle of getting Pin and Unpin right for your own types
+- slab: Efficent data structure in use in place of HashMap<Token, T> where
+Token is an opaque type used only to differentiate between entries in the map
+- static_assertions: assertions that are evaluated as compile time
+- structopt: Provides a way to describe your application's command line entirely
+using the Rust type system
+
+## Configuring cargo to share build artifacts
+Set [build] target in ~/.cargo/config.toml to the directory shared artifacts should go in. 
+Note that this can cause problems for projects that assume that compiler artifacts
+will always be under the target subdirectory
+
+# Check build timings
+- cargo build --timings
+
+# Print out the sizes of all the types and alihment in the current crate. 
+- RUSTFLAGS=-Zprint-type-sizes cargo +nightly build --release
+- rustc +nightly -Zprint-type-sizes input.rs
+
+# Iter::once
+The iter::once function takes any value and produces an iterator that yields that value once. This comes in handy when calling functions that take iterators if you don’t want to allocate, or when combined with Iterator::chain to append a single item to an existing iterator.
