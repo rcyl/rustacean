@@ -1,3 +1,40 @@
+## repr
+```
+repr(transparent)
+```
+Can only be used with types with a single field which guarantees that
+the layout of the outer type is exactly the same as that of the inner type. 
+This is handy with the "newtype" pattern, where you want the memory representation
+of sturct A and struct NewA(A) to be the same
+
+```repr(packed)``` is self explanatory
+
+```repr(align(n))``` to ensure that different value is stored contiguously in memory
+
+## Dispatch
+Use static dispath in libraries and dynamic dispatch in binaries
+
+## Associated Type
+```
+trait Foo<T> vs Foo { type Bar; }
+```
+Use associated type if you expect only one implementation of the trait for a given type
+and generic type parameter otherwise. 
+
+## Orphan rule
+You can implement a trait for a type only if the trait OR the type is local to your crate
+
+## Higher Ranked trait bound
+```
+F: for<'a> Fn(&'a T) -> &'a U
+```
+For any lifetime 'a, the bound must hold. Generally ythe compiler adds this for you
+so the explicit form is exceedingly rare. 
+
+## Borrow vs Deref/AsRef
+Borrow is for your type is essentially equivalent to another type, whereas
+Deref and AsRef is for anything your type can "act as"
+
 ## Moving value behing a mutable reference
 ```
 fn replace_with_84(s: &mut Box<i32>) {
@@ -65,7 +102,16 @@ fn main() {
 In genernal, the comunity consensus is that errors are rare and therefore
 should not add much cost to the "happy path". For that reason, errors are 
 often placed behind a pointer type, such a Box or Arc, so that they are 
-unlikely to add much to the size of the overall Result type thy're contained within
+unlikely to add much to the size of the overall Result type they are contained within
+Error types should also be 'static so that it can be propagated up the call stack
+without running into lifetime issues. 
+
+## Error downcasting
+Downcasting allows a user turn a dyn Error into a concrete underlying error type
+If the user wants to perform an action if the error was std::io::Error (with 
+std::io::ErrorKind::WouldBlock), and they get a dyn Error, they can use 
+Error::downcast_ref to downcast the error into a std::io::Error. Downcast_ref
+only works if the argument is 'static.
 
 ## Overiding dependency sources
 ``` 
@@ -81,6 +127,17 @@ serde = { git = "https://github.com/serde-rs/serde.git", branch="faster"}
 # patch a git dependency
 [patch.'https://github.com/somebody/project.git']
 project = { path = "/home/somebody/project" }
+```
+
+## Operating system options
+#[cfg(any(windows,target_os = "macos"))]
+
+Conditional dependencies
+```
+[target.'cfg(windows)'.dependencies]
+winrt = "0.7"
+[target.'cfg(unix)'.dependencies]
+nix = "0.17"
 ```
 
 ## Use cargo deny and cargo audit
@@ -128,7 +185,7 @@ for assertion purposes in test
 
 ## Doc tests
 Doc tests appear in the public documentation of the crate and users are likely
-to mimic what they contain, so they are ran as integration testts. 
+to mimic what they contain, so they are ran as integration tests. 
 
 ## Linting
 Consider using cargo clippy in your CI. Clippy can catch code patterns that compile 
@@ -182,6 +239,11 @@ Briefly described, a generator is a chunk of code with some extra compiler-gener
 bits that enables it to stop, or yield, its execution midway through and then 
 resume from where it last yielded later on.
 
+## Size of generators
+The data structure used to back a generator’s state must be able to hold the combined state at any one yield point. If your async fn contains, say, a [u8; 8192], those 8KiB must be stored in the generator itself. The means the code can get quite large without any visible indicators. 
+copying. In fact, you can usually identify when the size of your generator-based futures is affecting performance by looking for excessive amounts of time spent in the memcpy function in your application’s performance profiles. 
+When you do find a particularly large future, you have two options: you can try to reduce the amount of local state the async functions need, or you can move the future to the heap (with Box::pin) so that moving the future just requires moving the pointer to it. The latter is by far the easiest way to go, but it also introduces an extra allocation and a pointer indirection.
+
 ## Pin
 Though Future makes use of Pin, Pin is not tied to the Future trait - you can
 use Pin for any self-refential data structure (ie, one that holds both data and
@@ -205,6 +267,11 @@ currently sleeping but that's more of a side effect than a primary purpose.
 Rule of thumb: no future should be able to run for more than 1ms without returning
 Poll::Pending
 
+## Unsafe fn versus unsafe code block
+unsafe fn is an unsigned contract that asks the author of calling code to 
+“solemnly swear X, Y, and Z.” Meanwhile, unsafe {} is the calling code’s 
+author signing off on all the unsafe contracts contained within the block.
+
 ## Pointer types
 Consider using std::ptr::NonNull<T> if you know the pointer is never null, it is
 analogous to a &. If the pointer might be null, use *const T. Raw pointers 
@@ -215,10 +282,13 @@ You can cast any Rust pointer to a *const std:ffi::c_void or *mut std::ffi::c_vo
 ## Opting out of safety checks
 Some safe implementations include bounds check that either panic or return an Option
 if the index provided is out of bounds. However, this adds overhead and may not be
-acceptable in high performaing code. When peak performance is important and the caller
+acceptable in high performing code. When peak performance is important and the caller
 knows that the indexes are in bound, many data structures provide alternate versions 
 of particular methods without the safety checks. The usually include the world unchecked
 and dont have those slow safety checks, for example slice::get_unchecekd, Arc::get_mut_unchecked
+
+## Send and Sync
+A common mistake with unsafe implementations of Send and Sync is to forget to add bounds to generic parameters: unsafe impl<T: Send> Send for MyUnsafeType<T> {}.
 
 ## Maybe Uninit for hot loop
 ```
@@ -235,7 +305,33 @@ fn fill(gen: impl FnMut() -> Option<u8>) {
 }
 ```
 This function allows us to fill in array without explicity setting the array to
-zeros first, ie [0; 4096]. This optimization could be crucial for hot loops
+zeros first, ie [0; 4096]. We allow the array to keep whatever values happend 
+to be on the stack when the function was called. 
+This optimization could be crucial for hot loops.
+
+## Casting
+```
+struct Foo<T> {
+    one: bool,
+    two: PhantomData<T>,
+}
+
+struct Bar;
+struct Baz;
+
+type A = Foo<Bar>;
+type B = Foo<Baz>;
+```
+Rust does not guarantee that A & B have the same in memory representation.
+The lack of guarantees in repr(Rust) means we must be careful when casting
+in unsafe code.
+
+## False sharing
+On Intel, cache line size is 64 bytes, which means every operation reads/writes
+some multiple of 64 bytes. False sharing happens when two cores want to update
+the value of two different bytes that happen to fall on the same cache line. 
+The updates execute sequentially, though they are logically disjoint. To avoid this,
+pad your values so that they are the size of a cache line. 
 
 ## Relaxed memory ordering
 ```
@@ -307,9 +403,32 @@ Ordering::Relaxed. This is not the case for other architectures and your program
 might be faster if you use Relaxed for atomic operations that can tolerate weaker
 memory ordering guarantees. 
 
+## Loom
+Consider loom for concurrency testing
+
 ## Running TSan
 RUSTFLAGS="-Z sanitizer=$SAN" cargo test --target x86_64-unknown-linux-gnu
 Where $SAN is one of address, leak, memory or thread.
+
+## Quirky c types
+C types like __be32, don't often translate directly to Rust types and may be
+best left as something like [u8; 4]. For example __be32 is encoded as big-endian
+whereas Rust's i32 follows the endianess of the current platform
+
+## FFI memory allocation
+- Implementation managed memory interface. Memory is managed by rust usually 
+via Box for example fn new() -> *mut RustType
+type and a free function that deallocates the memory when done.
+- Caller managed memory. Caller calls fn new(my_mem: *const c_void, len: c_int) -> *mut RustType
+No free function is provided as deallocation happens in the caller. 
+
+Prefer to allow caller to pass in memory when it is feasible since it gives the 
+caller more freedom to manage memory as it deems appropriate. Caller might be using 
+a highly specialized allocator or some custom OS and may not want to be forced
+to use the standard allocator. Caller could even use stack or reuse already allocated
+memory. 
+
+Go with caller allcoated memory for anything that is large or frequent. 
 
 ## Include generated bindings
 If bindgen runs in build.rs and generate bindings.rs, it can be included with
@@ -383,12 +502,53 @@ Set [build] target in ~/.cargo/config.toml to the directory shared artifacts sho
 Note that this can cause problems for projects that assume that compiler artifacts
 will always be under the target subdirectory
 
-# Check build timings
+## Check build timings
 - cargo build --timings
 
-# Print out the sizes of all the types and alihment in the current crate. 
+## Print out the sizes of all the types and alignment in the current crate. 
 - RUSTFLAGS=-Zprint-type-sizes cargo +nightly build --release
 - rustc +nightly -Zprint-type-sizes input.rs
 
-# Iter::once
+## Iter::once
 The iter::once function takes any value and produces an iterator that yields that value once. This comes in handy when calling functions that take iterators if you don’t want to allocate, or when combined with Iterator::chain to append a single item to an existing iterator.
+
+## std::sync Once
+Runs a given piece of code exactly once at initialization time. Good for FFI
+
+## Methods
+- Arc::make_mut: Takes a &mut Arc&lt;T&gt; and gives you a &mut T
+- Clone::clone_from: Alternative to .clone() that lets you reuse and instance 
+of the type you clone rather than allocate a new one. Performs copy assignment from source
+- Instant:elapsed: Returns the Duration since ance Instant was created
+- Option::as_deref: Takes an Option&lt;P&gt; where P: Deref and returns Option<&P:Target>
+this can make functional transfromation chains cleaner by avoiding .as_ref().map(|r| &**r)
+- Ord::clamp: x.clamp(min, max) returns min if x is less than min, max if x is greater and max
+and x otherwise
+- Result::transpose (or Option::transpose): inverts types that nest Result and Option. 
+When combined with ? can make for cleaner code when working with Iterator::next()
+- Vec::swap_remove is faster than Vec::remove because it swaps the to be removed element
+with the last element and trucates the vector's length by 1
+
+## Patterns in the wild
+- indexmap: HashMap implementation where iteration order matches the map insertion order. 
+this uses index pointers
+
+## Drop guard
+```
+fn mutex(lock: &AtomicBool, f: impl FnOnce()) {
+    // .. while lock.compare_exchange(false, true).is_err() ..
+    struct DropGuard<'a>(&'a AtomicBool);
+    impl Drop for DropGuard<'_> {
+        fn drop(&mut self) {
+            lock.store(true, Ordering::Release);
+        }
+    }
+    let _guard = DropGuard(lock);
+    f();
+}
+```
+This code ensures that the cleanup code gets run even when f() panics
+Although the guard is never refered to it again, it needs a name because
+let _ = DropGuard(lock) would drop the guard immediatedly
+
+
